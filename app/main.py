@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
-# Load .env without overriding real environment variables.
+
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
@@ -37,13 +37,13 @@ app = FastAPI(
 )
 
 
-# -------------------------------------------------------------------
+
 # Startup and database indexes
-# -------------------------------------------------------------------
+
 
 @app.on_event("startup")
 def create_indexes():
-    # Idempotent: running startup again does not create duplicate indexes.
+    
     employees.create_index(
         [("emp_code", ASCENDING)],
         unique=True,
@@ -77,9 +77,7 @@ def create_indexes():
     )
 
 
-# -------------------------------------------------------------------
 # Common helpers
-# -------------------------------------------------------------------
 
 def public_document(doc: dict) -> dict:
     """Remove MongoDB's internal identifier from API responses."""
@@ -148,9 +146,7 @@ def page_result(
     }
 
 
-# -------------------------------------------------------------------
 # Request models
-# -------------------------------------------------------------------
 
 class EmployeeCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -199,9 +195,7 @@ class EmployeeCreate(BaseModel):
         return value
 
 
-# -------------------------------------------------------------------
 # Health endpoint
-# -------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -215,9 +209,7 @@ def health():
         )
 
 
-# -------------------------------------------------------------------
 # Employee endpoints
-# -------------------------------------------------------------------
 
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeCreate):
@@ -240,7 +232,7 @@ def create_employee(body: EmployeeCreate):
         )
 
     
-    # Return the API representation, not MongoDB's internal _id.
+    
     document.pop("_id", None)
     document["created_at"] = to_epoch_ms(document["created_at"])
     return document
@@ -271,9 +263,7 @@ def list_employees(
             detail="Database operation failed",
         )
 
-# -------------------------------------------------------------------
 # Attendance request models
-# -------------------------------------------------------------------
 
 from pydantic import field_validator
 
@@ -331,9 +321,7 @@ class RegularizeRequest(BaseModel):
         return value
 
 
-# -------------------------------------------------------------------
 # Attendance calculation and serialization helpers
-# -------------------------------------------------------------------
 
 def normalized_datetime(value: datetime) -> datetime:
     """MongoDB returns naive UTC datetimes by default."""
@@ -457,9 +445,8 @@ def serialize_attendance(doc: dict) -> dict:
     return doc
 
 
-# -------------------------------------------------------------------
 # POST /attendance/punch-in
-# -------------------------------------------------------------------
+
 
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInRequest):
@@ -502,9 +489,9 @@ def punch_in(body: PunchInRequest):
     return serialize_attendance(document)
 
 
-# -------------------------------------------------------------------
+
 # POST /attendance/punch-out
-# -------------------------------------------------------------------
+
 
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutRequest):
@@ -580,9 +567,9 @@ def punch_out(body: PunchOutRequest):
     return serialize_attendance(updated)
 
 
-# -------------------------------------------------------------------
+
 # GET /attendance
-# -------------------------------------------------------------------
+
 
 @app.get("/attendance")
 def list_attendance(
@@ -639,9 +626,9 @@ def list_attendance(
         raise HTTPException(503, "Database operation failed")
 
 
-# -------------------------------------------------------------------
+
 # PATCH /attendance/{emp_code}/{date}
-# -------------------------------------------------------------------
+
 
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize_attendance(
@@ -876,9 +863,7 @@ def build_department_trend_pipeline(department, end_text, start_text, end_exclus
     """Build the exact MongoDB pipeline used by the department trend endpoint."""
     return [{'$match': {'department': department, 'joined_on': {'$lte': end_text}}}, {'$lookup': {'from': 'attendance_logs', 'let': {'employee_code': '$emp_code'}, 'pipeline': [{'$match': {'$expr': {'$and': [{'$eq': ['$emp_code', '$$employee_code']}, {'$gte': ['$date', start_text]}, {'$lt': ['$date', end_exclusive]}]}}}, {'$project': {'_id': 0, 'date': 1, 'status': 1, 'half_day': 1, 'late_minutes': 1}}], 'as': 'logs'}}, {'$unwind': {'path': '$logs', 'preserveNullAndEmptyArrays': True}}, {'$set': {'_date': {'$cond': [{'$ifNull': ['$logs.date', False]}, {'$dateFromString': {'dateString': '$logs.date'}}, start_datetime]}}}, {'$group': {'_id': {'emp_code': '$emp_code', 'date': '$_date'}, 'joined_on': {'$first': '$joined_on'}, 'status': {'$first': '$logs.status'}, 'half_day': {'$first': '$logs.half_day'}, 'late_minutes': {'$first': '$logs.late_minutes'}}}, {'$project': {'_id': 0, 'emp_code': '$_id.emp_code', '_date': '$_id.date', 'joined_on': 1, 'status': 1, 'half_day': 1, 'late_minutes': 1}}, {'$densify': {'field': '_date', 'partitionByFields': ['emp_code'], 'range': {'step': 1, 'unit': 'day', 'bounds': [start_datetime, end_datetime_exclusive]}}}, {'$group': {'_id': '$_date', 'headcount': {'$sum': {'$cond': [{'$lte': ['$joined_on', {'$dateToString': {'date': '$_date', 'format': '%Y-%m-%d', 'timezone': 'UTC'}}]}, 1, 0]}}, 'present_count': {'$sum': {'$cond': [{'$in': ['$status', list(PRESENT_STATUSES)]}, {'$cond': [{'$eq': ['$half_day', True]}, 0.5, 1.0]}, 0]}}, 'late_count': {'$sum': {'$cond': [{'$gt': ['$late_minutes', 0]}, 1, 0]}}}}, {'$set': {'date': {'$dateToString': {'date': '$_id', 'format': '%Y-%m-%d', 'timezone': 'UTC'}}, 'is_working_day': {'$and': [{'$gte': [{'$dayOfWeek': '$_id'}, 2]}, {'$lte': [{'$dayOfWeek': '$_id'}, 6]}]}}}, {'$set': {'attendance_rate': {'$cond': [{'$and': ['$is_working_day', {'$gt': ['$headcount', 0]}]}, {'$round': [{'$multiply': [{'$divide': ['$present_count', '$headcount']}, 100]}, 4]}, None]}}}, {'$setWindowFields': {'sortBy': {'_id': 1}, 'output': {'moving_avg_7d': {'$avg': '$attendance_rate', 'window': {'documents': [-6, 0]}}}}}, {'$project': {'_id': 0, 'date': 1, 'is_working_day': 1, 'headcount': 1, 'present_count': 1, 'late_count': 1, 'attendance_rate': 1, 'moving_avg_7d': {'$cond': [{'$eq': ['$moving_avg_7d', None]}, None, {'$round': ['$moving_avg_7d', 4]}]}}}, {'$sort': {'date': 1}}]
 
-# -------------------------------------------------------------------
 # GET /analytics/employees/{emp_code}/monthly
-# -------------------------------------------------------------------
 
 @app.get("/analytics/employees/{emp_code}/monthly")
 def employee_monthly(
@@ -953,9 +938,7 @@ def employee_monthly(
     }
 
 
-# -------------------------------------------------------------------
 # GET /analytics/departments/summary
-# -------------------------------------------------------------------
 
 @app.get("/analytics/departments/summary")
 def department_summary(
@@ -997,9 +980,9 @@ def department_summary(
 
     return {"month": month, "items": items}
 
-# -------------------------------------------------------------------
+
 # GET /analytics/leaderboard/late
-# -------------------------------------------------------------------
+
 
 @app.get("/analytics/leaderboard/late")
 def late_leaderboard(
@@ -1092,9 +1075,8 @@ def late_leaderboard(
         "department": department,
         "items": ranked,
     }
-# -------------------------------------------------------------------
+
 # GET /analytics/departments/{department}/trend
-# -------------------------------------------------------------------
 
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(
@@ -1160,13 +1142,7 @@ def department_trend(
 
     return {"department": department, "items": items}
 
-
-
-# -------------------------------------------------------------------
 # GET /admin/explain/{endpoint}
-# -------------------------------------------------------------------
-
-
 
 @app.get("/admin/explain/{endpoint}")
 def explain_endpoint(
